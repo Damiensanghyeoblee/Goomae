@@ -10,6 +10,7 @@ interface HeaderProps {
   onOpenAdd: () => void;
   onLogout: () => void;
   onOpenSqlGuide: () => void;
+  onOpenLogin: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -21,6 +22,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAdd,
   onLogout,
   onOpenSqlGuide,
+  onOpenLogin,
 }) => {
   return (
     <header className="bg-white border-b border-slate-200 sticky top-0 z-20 shadow-xs">
@@ -57,6 +59,14 @@ export const Header: React.FC<HeaderProps> = ({
           >
             <Database className="w-4 h-4 text-slate-500" />
             <span className="hidden md:inline">Supabase SQL</span>
+          </button>
+
+          <button
+            onClick={onOpenLogin}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg hover:bg-indigo-100 transition-colors shadow-2xs"
+          >
+            <User className="w-4 h-4 text-indigo-600" />
+            <span>Supabase 로그인</span>
           </button>
 
           <button
