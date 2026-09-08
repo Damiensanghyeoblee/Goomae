@@ -1,8 +1,3 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import React, { useState, useEffect, useMemo } from 'react';
 import { QuoteItem, FilterState, CalculatedQuoteItem } from './types';
 import { INITIAL_QUOTES } from './data';
@@ -14,10 +9,21 @@ import { QuoteTable } from './components/QuoteTable';
 import { PRComparisonModal } from './components/PRComparisonModal';
 import { QuoteFormModal } from './components/QuoteFormModal';
 import { ImportModal } from './components/ImportModal';
+import { LoginModal } from './components/LoginModal';
+import { SupabaseSqlModal } from './components/SupabaseSqlModal';
+import { supabase, isSupabaseConfigured } from './lib/supabase';
+import { fetchQuotesFromSupabase, upsertQuotesToSupabase, deleteQuoteFromSupabase } from './lib/supabaseSync';
 
 const STORAGE_KEY = 'exs02.quotes.v1';
+const USER_KEY = 'exs02.user.v1';
 
 export default function App() {
+  const [userEmail, setUserEmail] = useState<string | null>(() => {
+    return localStorage.getItem(USER_KEY) || (isSupabaseConfigured ? null : 'demo-user@company.com');
+  });
+  const [isLoginOpen, setIsLoginOpen] = useState(false);
+  const [isSqlModalOpen, setIsSqlModalOpen] = useState(false);
+
   const [quotes, setQuotes] = useState<QuoteItem[]>(() => {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
@@ -49,14 +55,60 @@ export default function App() {
   const [editingItem, setEditingItem] = useState<QuoteItem | null>(null);
   const [isImportOpen, setIsImportOpen] = useState(false);
 
-  // Save to localStorage
+  // Check Supabase session on mount
+  useEffect(() => {
+    if (isSupabaseConfigured && supabase) {
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        if (session?.user?.email) {
+          setUserEmail(session.user.email);
+          localStorage.setItem(USER_KEY, session.user.email);
+        } else if (!userEmail) {
+          setIsLoginOpen(true);
+        }
+      });
+
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        if (session?.user?.email) {
+          setUserEmail(session.user.email);
+          localStorage.setItem(USER_KEY, session.user.email);
+          setIsLoginOpen(false);
+        }
+      });
+
+      return () => {
+        subscription.unsubscribe();
+      };
+    } else if (!userEmail) {
+      setIsLoginOpen(true);
+    }
+  }, []);
+
+  // Fetch data from Supabase when user is authenticated and configured
+  useEffect(() => {
+    if (isSupabaseConfigured && userEmail) {
+      fetchQuotesFromSupabase().then((remoteQuotes) => {
+        if (remoteQuotes && remoteQuotes.length > 0) {
+          setQuotes(remoteQuotes);
+        } else {
+          // If remote is empty, seed with initial or local quotes
+          upsertQuotesToSupabase(quotes);
+        }
+      });
+    }
+  }, [userEmail]);
+
+  // Save to localStorage and sync to Supabase
   useEffect(() => {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(quotes));
     } catch (e) {
       console.error('Failed to save quotes to localStorage', e);
     }
-  }, [quotes]);
+
+    if (isSupabaseConfigured && userEmail) {
+      upsertQuotesToSupabase(quotes);
+    }
+  }, [quotes, userEmail]);
 
   // Calculate items
   const calculatedItems = useMemo(() => {
@@ -101,7 +153,7 @@ export default function App() {
         return false;
       }
 
-      // Missing only (unit_price is null or (status === 발주 and promised_date is null))
+      // Missing only
       if (filter.missingOnly) {
         const isMissingPrice = item.unit_price === null;
         const isMissingDelivery = item.status === '발주' && !item.promised_date;
@@ -115,7 +167,6 @@ export default function App() {
 
       return true;
     }).sort((a, b) => {
-      // Delivery rank order (PRD 5.7)
       const getRank = (item: CalculatedQuoteItem) => {
         if (item.status !== '발주') return 4;
         if (item.deliveryState === '지연') return 0;
@@ -128,15 +179,12 @@ export default function App() {
       const rankB = getRank(b);
       if (rankA !== rankB) return rankA - rankB;
 
-      // dDays ascending
       const daysA = a.dDays !== null ? a.dDays : 9999;
       const daysB = b.dDays !== null ? b.dDays : 9999;
       if (daysA !== daysB) return daysA - daysB;
 
-      // pr_no
       if (a.pr_no !== b.pr_no) return a.pr_no.localeCompare(b.pr_no);
 
-      // unit_price ascending
       const priceA = a.unit_price !== null ? a.unit_price : 999999999;
       const priceB = b.unit_price !== null ? b.unit_price : 999999999;
       return priceA - priceB;
@@ -155,6 +203,9 @@ export default function App() {
         missingOnly: false,
         selectedPr: null,
       });
+      if (isSupabaseConfigured) {
+        upsertQuotesToSupabase(INITIAL_QUOTES);
+      }
     }
   };
 
@@ -201,12 +252,24 @@ export default function App() {
 
   const handleDeleteQuote = (quoteId: string) => {
     setQuotes((prev) => prev.filter((q) => q.quote_id !== quoteId));
+    if (isSupabaseConfigured) {
+      deleteQuoteFromSupabase(quoteId);
+    }
   };
 
   const handleUpdateStatus = (quoteId: string, newStatus: '견적' | '발주') => {
     setQuotes((prev) =>
       prev.map((q) => (q.quote_id === quoteId ? { ...q, status: newStatus } : q))
     );
+  };
+
+  const handleLogout = async () => {
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
+    setUserEmail(null);
+    localStorage.removeItem(USER_KEY);
+    setIsLoginOpen(true);
   };
 
   const nextQuoteId = useMemo(() => {
@@ -225,6 +288,7 @@ export default function App() {
     <div className="min-h-screen bg-slate-100/70 text-slate-900 flex flex-col font-sans antialiased">
       <Header
         totalCount={quotes.length}
+        userEmail={userEmail}
         onReset={handleReset}
         onExportCsv={handleExportCsv}
         onOpenImport={() => setIsImportOpen(true)}
@@ -232,17 +296,17 @@ export default function App() {
           setEditingItem(null);
           setIsFormOpen(true);
         }}
+        onLogout={handleLogout}
+        onOpenSqlGuide={() => setIsSqlModalOpen(true)}
       />
 
       <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        {/* Warning Summary Dashboard Cards (F-07) */}
         <SummaryCards
           items={calculatedItems}
           filter={filter}
           onFilterChange={(updater) => setFilter((prev) => ({ ...prev, ...updater }))}
         />
 
-        {/* Filter & Search Bar */}
         <FilterBar
           filter={filter}
           onFilterChange={(updater) => setFilter((prev) => ({ ...prev, ...updater }))}
@@ -262,7 +326,6 @@ export default function App() {
           resultCount={filteredItems.length}
         />
 
-        {/* Main Quote Table / List */}
         <QuoteTable
           items={filteredItems}
           isGroupedByPr={isGroupedByPr}
@@ -274,7 +337,6 @@ export default function App() {
         />
       </main>
 
-      {/* PR Comparison Detail Modal (S-03) */}
       <PRComparisonModal
         prNo={activeModalPr}
         items={calculatedItems}
@@ -282,7 +344,6 @@ export default function App() {
         onUpdateStatus={handleUpdateStatus}
       />
 
-      {/* Add / Edit Quote Form Modal (S-04) */}
       <QuoteFormModal
         isOpen={isFormOpen}
         editingItem={editingItem}
@@ -295,13 +356,36 @@ export default function App() {
         nextQuoteId={nextQuoteId}
       />
 
-      {/* CSV Import Modal (F-01) */}
       <ImportModal
         isOpen={isImportOpen}
         onClose={() => setIsImportOpen(false)}
         onImportData={(imported) => {
+          // Accumulate CSV data with existing or replace according to import choice
           setQuotes(imported);
+          if (isSupabaseConfigured) {
+            upsertQuotesToSupabase(imported);
+          }
         }}
+      />
+
+      <LoginModal
+        isOpen={isLoginOpen && !userEmail}
+        onSuccess={(email) => {
+          setUserEmail(email);
+          localStorage.setItem(USER_KEY, email);
+          setIsLoginOpen(false);
+        }}
+        onOpenSqlGuide={() => setIsSqlModalOpen(true)}
+        onSkipDemo={() => {
+          setUserEmail('demo-user@company.com');
+          localStorage.setItem(USER_KEY, 'demo-user@company.com');
+          setIsLoginOpen(false);
+        }}
+      />
+
+      <SupabaseSqlModal
+        isOpen={isSqlModalOpen}
+        onClose={() => setIsSqlModalOpen(false)}
       />
     </div>
   );
